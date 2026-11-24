@@ -1,0 +1,10 @@
+Package: com.tfd.recordisland
+Name: 录屏岛帧动画
+Description: 录屏时用自定义帧序列替换灵动岛/状态栏指示（原创实现）
+Maintainer: tfd
+Author: tfd
+Section: Tweaks
+Depends: mobilesubstrate (>= 0.9.5000), firmware (>= 15.0)
+Architecture: iphoneos-arm64
+Version: 1.0.0
+Installed-Size: 520

@@ -1,0 +1,5 @@
+build/
+.theos/
+obj/
+packages/
+*.o

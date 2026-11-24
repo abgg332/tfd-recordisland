@@ -1,0 +1,102 @@
+name: Build TFDRecordIsland
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tfd-recordisland
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version
+        run: echo "VERSION=$(awk '/^Version:/{print $2; exit}' control)" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: brew install ldid dpkg
+
+      - name: Install Theos
+        run: |
+          git clone --recursive https://github.com/theos/theos.git ~/theos
+          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+
+      - name: Install iPhoneOS SDK
+        run: |
+          mkdir -p "$THEOS/sdks"
+          PRIMARY="https://github.com/abgg332/driftisland-pub/releases/download/sdk-cache/iPhoneOS16.5.sdk.tar.xz"
+          FALLBACK="https://github.com/theos/sdks/releases/download/master-146e41f/iPhoneOS16.5.sdk.tar.xz"
+          ok=0
+          for i in 1 2 3 4 5 6 7 8; do
+            for URL in "$PRIMARY" "$FALLBACK"; do
+              echo "== SDK 第 $i 轮 $URL"
+              if curl -fL --retry 2 --retry-delay 4 --retry-all-errors --connect-timeout 30 -o /tmp/sdk.tar.xz "$URL" \
+                 && tar -tJf /tmp/sdk.tar.xz >/dev/null 2>&1; then ok=1; break; fi
+              rm -f /tmp/sdk.tar.xz; sleep 8
+            done
+            [ "$ok" = "1" ] && break
+            sleep 15
+          done
+          [ "$ok" = "1" ] || { echo "SDK 下载失败"; exit 1; }
+          tar -xJf /tmp/sdk.tar.xz -C "$THEOS/sdks"
+          ls "$THEOS/sdks"
+
+      - name: Build rootless
+        run: |
+          rm -rf .theos packages obj
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless ARCHS="arm64 arm64e"
+          mv packages/*.deb "packages/TFDRecordIsland-${VERSION}-rootless-arm64-arm64e.deb"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TFDRecordIsland-rootless
+          path: packages/*.deb
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Reinstall Theos (roothide)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          rm -rf ~/theos "$THEOS"
+          bash -c "$(curl -fsSL https://raw.githubusercontent.com/roothide/theos/master/bin/install-theos)" || echo "== 安装脚本 SDK 步骤失败, 自行补齐"
+          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+          mkdir -p "$HOME/theos/sdks"
+          if [ ! -d "$HOME/theos/sdks/iPhoneOS16.5.sdk" ]; then
+            PRIMARY="https://github.com/abgg332/driftisland-pub/releases/download/sdk-cache/iPhoneOS16.5.sdk.tar.xz"
+            FALLBACK="https://github.com/theos/sdks/releases/download/master-146e41f/iPhoneOS16.5.sdk.tar.xz"
+            ok=0
+            for i in 1 2 3 4 5 6; do
+              for URL in "$PRIMARY" "$FALLBACK"; do
+                if curl -fL --retry 2 --retry-delay 4 --retry-all-errors --connect-timeout 30 -o /tmp/sdk2.tar.xz "$URL" \
+                   && tar -tJf /tmp/sdk2.tar.xz >/dev/null 2>&1; then ok=1; break; fi
+                rm -f /tmp/sdk2.tar.xz; sleep 8
+              done
+              [ "$ok" = "1" ] && break
+              sleep 15
+            done
+            [ "$ok" = "1" ] || { echo "roothide SDK 补齐失败"; exit 1; }
+            tar -xJf /tmp/sdk2.tar.xz -C "$HOME/theos/sdks"
+          fi
+          ls "$HOME/theos/sdks"
+
+      - name: Build roothide (arm64e)
+        run: |
+          rm -rf .theos packages obj
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide ARCHS=arm64e
+          mv packages/*.deb "packages/TFDRecordIsland-${VERSION}-RootHide-arm64e.deb"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TFDRecordIsland-roothide
+          path: packages/*.deb
+          if-no-files-found: error
+          retention-days: 30
