@@ -14,10 +14,8 @@ TFDRecordIsland_LDFLAGS = -F$(THEOS_VENDOR_LIBRARY_PATH) -framework CydiaSubstra
 include $(THEOS)/makefiles/tweak.mk
 
 after-stage::
-	@echo "==> 布局文件"
-	@mkdir -p "$(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries"
+	@echo "==> 设置面板布局"
 	@mkdir -p "$(THEOS_STAGING_DIR)/Library/PreferenceLoader/Preferences"
-	@cp layout/Library/MobileSubstrate/DynamicLibraries/TFDRecordIsland.plist "$(THEOS_STAGING_DIR)/Library/MobileSubstrate/DynamicLibraries/"
 	@cp layout/Library/PreferenceLoader/Preferences/TFDRecordIsland.plist "$(THEOS_STAGING_DIR)/Library/PreferenceLoader/Preferences/"
 	@cp layout/Library/PreferenceLoader/Preferences/TFDRecordIslandPrefs.plist "$(THEOS_STAGING_DIR)/Library/PreferenceLoader/Preferences/"
 
