@@ -146,7 +146,13 @@ static BOOL TFDIsRecording(void) {
         [self.map setObject:p forKey:host];
     }
     NSDictionary *s = TFDReadSettings(kind);
-    p.assetName       = s[@"asset"];
+    // 素材名为空时自动用目录里第一个素材 —— 否则用户放了素材也不会有任何效果
+    NSString *asset = s[@"asset"];
+    if (!asset.length) {
+        NSArray *list = [TFDPlayerView availableAssets];
+        if (list.count) asset = list.firstObject;
+    }
+    p.assetName       = asset;
     p.fps             = [s[@"fps"] doubleValue];
     p.rotationEnabled = [s[@"rotation"] boolValue];
     p.rotationReverse = [s[@"rotationReverse"] boolValue];
@@ -170,7 +176,25 @@ static BOOL TFDIsRecording(void) {
     [self.kinds setObject:kind forKey:host];
     TFDPlayerView *p = [self playerForHost:host kind:kind];
 
-    if (host.bounds.size.width <= 0 || host.bounds.size.height <= 0) return;
+    // 首次布局时 bounds 往往还是 0，直接 return 会导致永远挂不上。
+    // 这里改为延迟重试，最多 8 次（约 0.8 秒）。
+    if (host.bounds.size.width <= 0 || host.bounds.size.height <= 0) {
+        static NSMapTable<UIView *, NSNumber *> *retries;
+        static dispatch_once_t once; dispatch_once(&once, ^{ retries = [NSMapTable weakToStrongObjectsMapTable]; });
+        NSNumber *n = [retries objectForKey:host] ?: @0;
+        if (n.integerValue < 8) {
+            [retries setObject:@(n.integerValue + 1) forKey:host];
+            __weak UIView *weakHost = host;
+            __weak typeof(self) weakSelf = self;
+            NSString *k2 = kind;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                UIView *h = weakHost;
+                if (h) [weakSelf attachToHost:h kind:k2];
+            });
+        }
+        return;
+    }
 
     if (p.superview != host) {
         p.frame = host.bounds;
@@ -389,10 +413,36 @@ static void TFDRecordingChanged(CFNotificationCenterRef center, void *observer,
                                 CFStringRef name, const void *object,
                                 CFDictionaryRef userInfo) {
     BOOL rec = TFDIsRecording();
-    TFDLog(@"录屏 -> %@", rec ? @"开始" : @"结束");
+    TFDLog(@"录屏通知 -> %@", rec ? @"开始" : @"结束");
     dispatch_async(dispatch_get_main_queue(), ^{
         if (rec && gDiscovered <= 0) TFDDiscoverAndHook();   // 首次录屏补扫
         [[TFDHost shared] syncAll];
+    });
+}
+
+/// 通知有时收不到（尤其是控制中心启动录屏），加 1 秒轮询兜底。
+/// 只在状态发生变化时才动作，平时几乎零开销。
+static void TFDStartPolling(void) {
+    static dispatch_source_t timer;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+                                       dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+        dispatch_source_set_timer(timer,
+            dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC),
+            1 * NSEC_PER_SEC, 200 * NSEC_PER_MSEC);
+        dispatch_source_set_event_handler(timer, ^{
+            static BOOL last = NO;
+            BOOL now = TFDIsRecording();
+            if (now == last) return;
+            last = now;
+            TFDLog(@"轮询捕获到录屏 %@", now ? @"开始" : @"结束");
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (now && gDiscovered <= 0) TFDDiscoverAndHook();
+                [[TFDHost shared] syncAll];
+            });
+        });
+        dispatch_resume(timer);
     });
 }
 
@@ -418,5 +468,6 @@ __attribute__((constructor)) static void TFDInstall(void) {
                                     NULL, TFDRecordingChanged,
                                     CFSTR("UIScreenCapturedDidChangeNotification"),
                                     NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+    TFDStartPolling();
     TFDLog(@"初始化完成，素材根=%@", TFDDefaultAssetRoot);
 }

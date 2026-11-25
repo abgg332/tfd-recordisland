@@ -6,7 +6,7 @@
         },
         {
             cell = PSSwitchCell;
-            key = "enabled";
+            key = "Enabled";
             default = 1;
             label = "启用录屏岛动画";
             defaultEntry = "NSUserDefaults";
@@ -18,7 +18,7 @@
         },
         {
             cell = PSEditTextCell;
-            key = "asset";
+            key = "AssetName";
             default = "";
             label = "素材名";
             placeholder = "例如 爱心";
@@ -30,7 +30,7 @@
         },
         {
             cell = PSSliderCell;
-            key = "fps";
+            key = "FPS";
             default = 60;
             label = "帧率";
             min = 10;
@@ -41,21 +41,21 @@
         },
         {
             cell = PSSwitchCell;
-            key = "rotation";
+            key = "AssetRotation";
             default = 0;
             label = "旋转";
             defaultEntry = "NSUserDefaults";
         },
         {
             cell = PSSwitchCell;
-            key = "rotationReverse";
+            key = "AssetReverseRotation";
             default = 0;
             label = "反向旋转";
             defaultEntry = "NSUserDefaults";
         },
         {
             cell = PSSliderCell;
-            key = "rotationSpeed";
+            key = "AssetRotationSpeed";
             default = 5;
             label = "旋转速度";
             min = 1;
@@ -69,7 +69,7 @@
         },
         {
             cell = PSSliderCell;
-            key = "scale";
+            key = "AssetScale";
             default = 1;
             label = "缩放";
             min = 0.5;
@@ -79,7 +79,7 @@
         },
         {
             cell = PSSliderCell;
-            key = "offsetX";
+            key = "AssetOffsetX";
             default = 0;
             label = "水平偏移";
             min = -50;
@@ -89,7 +89,7 @@
         },
         {
             cell = PSSliderCell;
-            key = "offsetY";
+            key = "AssetOffsetY";
             default = 0;
             label = "垂直偏移";
             min = -50;
@@ -99,7 +99,7 @@
         },
         {
             cell = PSSwitchCell;
-            key = "hideSiblings";
+            key = "HideSystemContent";
             default = 1;
             label = "隐藏系统原有内容";
             defaultEntry = "NSUserDefaults";
