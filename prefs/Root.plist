@@ -1,0 +1,108 @@
+{
+    items = (
+        {
+            cell = PSGroupCell;
+            label = "总开关";
+        },
+        {
+            cell = PSSwitchCell;
+            key = "enabled";
+            default = 1;
+            label = "启用录屏岛动画";
+            defaultEntry = "NSUserDefaults";
+        },
+        {
+            cell = PSGroupCell;
+            label = "素材";
+            footerText = "把帧序列放在 /var/mobile/灵动岛/帧率素材/<素材名>/ 里，文件名 1.png 2.png 3.png ... 按数字自然排序。";
+        },
+        {
+            cell = PSEditTextCell;
+            key = "asset";
+            default = "";
+            label = "素材名";
+            placeholder = "例如 爱心";
+            defaultEntry = "NSUserDefaults";
+        },
+        {
+            cell = PSGroupCell;
+            label = "播放";
+        },
+        {
+            cell = PSSliderCell;
+            key = "fps";
+            default = 60;
+            label = "帧率";
+            min = 10;
+            max = 120;
+            isSegmented = 0;
+            showValue = 1;
+            defaultEntry = "NSUserDefaults";
+        },
+        {
+            cell = PSSwitchCell;
+            key = "rotation";
+            default = 0;
+            label = "旋转";
+            defaultEntry = "NSUserDefaults";
+        },
+        {
+            cell = PSSwitchCell;
+            key = "rotationReverse";
+            default = 0;
+            label = "反向旋转";
+            defaultEntry = "NSUserDefaults";
+        },
+        {
+            cell = PSSliderCell;
+            key = "rotationSpeed";
+            default = 5;
+            label = "旋转速度";
+            min = 1;
+            max = 10;
+            showValue = 1;
+            defaultEntry = "NSUserDefaults";
+        },
+        {
+            cell = PSGroupCell;
+            label = "显示";
+        },
+        {
+            cell = PSSliderCell;
+            key = "scale";
+            default = 1;
+            label = "缩放";
+            min = 0.5;
+            max = 2;
+            showValue = 1;
+            defaultEntry = "NSUserDefaults";
+        },
+        {
+            cell = PSSliderCell;
+            key = "offsetX";
+            default = 0;
+            label = "水平偏移";
+            min = -50;
+            max = 50;
+            showValue = 1;
+            defaultEntry = "NSUserDefaults";
+        },
+        {
+            cell = PSSliderCell;
+            key = "offsetY";
+            default = 0;
+            label = "垂直偏移";
+            min = -50;
+            max = 50;
+            showValue = 1;
+            defaultEntry = "NSUserDefaults";
+        },
+        {
+            cell = PSSwitchCell;
+            key = "hideSiblings";
+            default = 1;
+            label = "隐藏系统原有内容";
+            defaultEntry = "NSUserDefaults";
+        },
+    );
+}

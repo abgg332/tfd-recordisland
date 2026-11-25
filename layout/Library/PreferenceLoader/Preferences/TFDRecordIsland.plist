@@ -2,8 +2,6 @@
     entry = {
         bundle = "com.tfd.recordislandprefs";
         cell = PSLinkCell;
-        detail = "TFDRecordIslandPrefs";
-        icon = "TFDRecordIsland.png";
         isController = 1;
         label = "录屏岛帧动画";
     };

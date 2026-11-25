@@ -40,6 +40,46 @@
 
 static const char *const kLogTag = "[TFD]";
 
+// ------------------------------------------------------------ 文件日志
+// 用户看不到 NSLog（要用电脑接 log stream），所以同时写文件，
+// 设置面板里有「日志」按钮直接查看这个文件。
+#define TFD_LOG_PATH "/var/mobile/Library/Logs/TFDRecordIsland.log"
+
+static void TFDLog(NSString *fmt, ...) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        [[NSFileManager defaultManager] createDirectoryAtPath:@"/var/mobile/Library/Logs"
+                                  withIntermediateDirectories:YES attributes:nil error:NULL];
+    });
+
+    va_list ap; va_start(ap, fmt);
+    NSString *body = [[NSString alloc] initWithFormat:fmt arguments:ap];
+    va_end(ap);
+
+    NSDateFormatter *f = [[NSDateFormatter alloc] init];
+    f.dateFormat = @"MM-dd HH:mm:ss.SSS";
+    NSString *line = [NSString stringWithFormat:@"%@ %@\n", [f stringFromDate:[NSDate date]], body];
+
+    NSLog(@"[TFD] %@", body);
+
+    // 超过 512KB 就截断重来，避免无限增长
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSDictionary *attr = [fm attributesOfItemAtPath:@TFD_LOG_PATH error:NULL];
+    if ([attr fileSize] > 512 * 1024) {
+        [fm removeItemAtPath:@TFD_LOG_PATH error:NULL];
+    }
+
+    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:@TFD_LOG_PATH];
+    if (!fh) {
+        [line writeToFile:@TFD_LOG_PATH atomically:NO encoding:NSUTF8StringEncoding error:NULL];
+    } else {
+        @try { [fh seekToEndOfFile]; [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]]; }
+        @catch (__unused NSException *e) {}
+        [fh closeFile];
+    }
+}
+
+
 // ---------------------------------------------------------------- 原始 IMP
 // 按 "类名|selector" 分别保存，绝不用一个全局槽
 static NSMutableDictionary<NSString *, id> *gOrigIMPs;
@@ -141,7 +181,7 @@ static BOOL TFDIsRecording(void) {
         NSString *key = NSStringFromClass([host class]);
         if (![logged containsObject:key]) {
             [logged addObject:key];
-            NSLog(@"%s 挂载 %@ kind=%@ %.0fx%.0f", kLogTag, key, kind,
+            TFDLog(@"挂载 %@ kind=%@ %.0fx%.0f", key, kind,
                   host.bounds.size.width, host.bounds.size.height);
         }
     } else if (!CGRectEqualToRect(p.frame, host.bounds)) {
@@ -243,7 +283,7 @@ static void TFDSetElementIdent(id self, SEL _cmd, id ident) {
 // ---------------------------------------------------------------- 状态栏红点
 static void TFDApplyUpdate(id self, SEL _cmd, id a, id b) {
     if (TFDEnabled() && TFDIsRecording()) {
-        static BOOL once; if (!once) { once = YES; NSLog(@"%s 已拦下状态栏录屏指示", kLogTag); }
+        static BOOL once; if (!once) { once = YES; TFDLog(@"已拦下状态栏录屏指示", kLogTag); }
         return;                                   // 不调原实现 = 不挂指示器
     }
     Class cls = object_getClass(self);
@@ -274,7 +314,7 @@ static void TFDHookOne(Class cls, NSString *selName, IMP newImp) {
     IMP orig = NULL;
     MSHookMessageEx(cls, s, newImp, &orig);
     TFDStoreOrig(cls, selName, orig);               // 按类分别保存
-    NSLog(@"%s   hook %@ -%@", kLogTag, NSStringFromClass(cls), selName);
+    TFDLog(@"  hook %@ -%@", NSStringFromClass(cls), selName);
 }
 
 static void TFDHookClass(Class cls) {
@@ -327,14 +367,14 @@ static void TFDDiscoverAndHook(void) {
     free(classes);
     if (found != gDiscovered) {
         gDiscovered = found;
-        NSLog(@"%s 扫到 %d 个候选元素类", kLogTag, found);
+        TFDLog(@"扫到 %d 个候选元素类", found);
     }
 }
 
 static void TFDHookStatusBar(void) {
     Class c = NSClassFromString(@"STUIStatusBarIndicatorRecordingItem");
     if (!c) {
-        NSLog(@"%s 无 STUIStatusBarIndicatorRecordingItem（版本差异，跳过）", kLogTag);
+        TFDLog(@"无 STUIStatusBarIndicatorRecordingItem（版本差异，跳过）", kLogTag);
         return;
     }
     SEL s = NSSelectorFromString(@"applyUpdate:toDisplayItem:");
@@ -342,14 +382,14 @@ static void TFDHookStatusBar(void) {
     IMP orig = NULL;
     MSHookMessageEx(c, s, (IMP)&TFDApplyUpdate, &orig);
     TFDStoreOrig(c, @"applyUpdate:toDisplayItem:", orig);
-    NSLog(@"%s 状态栏指示器已接管", kLogTag);
+    TFDLog(@"状态栏指示器已接管", kLogTag);
 }
 
 static void TFDRecordingChanged(CFNotificationCenterRef center, void *observer,
                                 CFStringRef name, const void *object,
                                 CFDictionaryRef userInfo) {
     BOOL rec = TFDIsRecording();
-    NSLog(@"%s 录屏 -> %@", kLogTag, rec ? @"开始" : @"结束");
+    TFDLog(@"录屏 -> %@", rec ? @"开始" : @"结束");
     dispatch_async(dispatch_get_main_queue(), ^{
         if (rec && gDiscovered <= 0) TFDDiscoverAndHook();   // 首次录屏补扫
         [[TFDHost shared] syncAll];
@@ -357,7 +397,7 @@ static void TFDRecordingChanged(CFNotificationCenterRef center, void *observer,
 }
 
 __attribute__((constructor)) static void TFDInstall(void) {
-    NSLog(@"%s v1.0.2 载入 pid=%d bundle=%@", kLogTag, getpid(),
+    TFDLog(@"v1.0.2 载入 pid=%d bundle=%@", getpid(),
           [NSBundle mainBundle].bundleIdentifier);
 
     gHooked = [NSMutableSet set];
@@ -378,5 +418,5 @@ __attribute__((constructor)) static void TFDInstall(void) {
                                     NULL, TFDRecordingChanged,
                                     CFSTR("UIScreenCapturedDidChangeNotification"),
                                     NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
-    NSLog(@"%s 初始化完成，素材根=%@", kLogTag, TFDDefaultAssetRoot);
+    TFDLog(@"初始化完成，素材根=%@", TFDDefaultAssetRoot);
 }
