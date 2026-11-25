@@ -40,6 +40,10 @@
 
 static const char *const kLogTag = "[TFD]";
 
+#ifndef TFD_VERSION
+#define TFD_VERSION "dev"
+#endif
+
 // ------------------------------------------------------------ 文件日志
 // 用户看不到 NSLog（要用电脑接 log stream），所以同时写文件，
 // 设置面板里有「日志」按钮直接查看这个文件。
@@ -356,7 +360,21 @@ static void TFDHookClass(Class cls) {
 }
 
 /// 特征 selector：响应任意一个就认为是灵动岛元素视图（不硬编码类名）
-static const char *kMarkers[] = {
+// 特征 selector：**必须同时满足** 才认定为灵动岛元素视图。
+// 之前只要求「任意一个命中」，于是 CNAtomTextView / MFAtomTextView /
+// PKPGSVSectionHeaderView 这些全被误 hook（setElementIdentifier: 太常见）。
+//
+// 用户日志显示真身是 NBXPillElement（NBX 是苹果内部对灵动岛的叫法），
+// 所以：名字含 NBX/Pill/Aperture/Island 的类，只要响应任一特征就认；
+// 其它类必须**同时**响应 setTrailingAnimationView: 和 detachedMinimalView
+// 才算 —— 这两个是灵动岛元素特有的，普通视图没有。
+static const char *const kStrongMarkers[] = {
+    "setTrailingAnimationView:",
+    "detachedMinimalView",
+    NULL
+};
+
+static const char *const kWeakMarkers[] = {
     "setTrailingAnimationView:",
     "leadingView",
     "detachedMinimalView",
@@ -364,6 +382,15 @@ static const char *kMarkers[] = {
     "setMiniAnimationView:",
     NULL
 };
+
+static BOOL TFDNameLooksLikeIsland(NSString *n) {
+    if (!n.length) return NO;
+    NSArray *kw = @[ @"NBX", @"Pill", @"Aperture", @"Island", @"DynamicIsland" ];
+    for (NSString *k in kw) {
+        if ([n rangeOfString:k options:NSCaseInsensitiveSearch].location != NSNotFound) return YES;
+    }
+    return NO;
+}
 
 static int gDiscovered = -1;
 
@@ -379,12 +406,22 @@ static void TFDDiscoverAndHook(void) {
         Class c = classes[i];
         NSString *cn = NSStringFromClass(c);
         if (!cn || [cn hasPrefix:@"TFD"]) continue;
+        // 判定：名字像灵动岛 -> 任一弱特征即可；
+        //       否则必须同时具备全部强特征（setTrailingAnimationView:
+        //       + detachedMinimalView），这才排除掉通讯录/邮件等误命中。
         BOOL match = NO;
-        for (int k = 0; kMarkers[k]; k++) {
-            SEL mk = sel_registerName(kMarkers[k]);
-            if (TFDClassOwnsSelector(c, mk)) { match = YES; break; }
+        if (TFDNameLooksLikeIsland(cn)) {
+            for (int k = 0; kWeakMarkers[k]; k++) {
+                if (TFDClassOwnsSelector(c, sel_registerName(kWeakMarkers[k]))) { match = YES; break; }
+            }
+        } else {
+            match = YES;
+            for (int k = 0; kStrongMarkers[k]; k++) {
+                if (!TFDClassOwnsSelector(c, sel_registerName(kStrongMarkers[k]))) { match = NO; break; }
+            }
         }
         if (!match) continue;
+        TFDLog(@"候选: %@", cn);
         TFDHookClass(c);
         found++;
     }
@@ -447,7 +484,7 @@ static void TFDStartPolling(void) {
 }
 
 __attribute__((constructor)) static void TFDInstall(void) {
-    TFDLog(@"v1.0.2 载入 pid=%d bundle=%@", getpid(),
+    TFDLog(@"v" TFD_VERSION " 载入 pid=%d bundle=%@", getpid(),
           [NSBundle mainBundle].bundleIdentifier);
 
     gHooked = [NSMutableSet set];

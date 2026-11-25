@@ -4,8 +4,9 @@ ARCHS = arm64 arm64e
 include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = TFDRecordIsland
-TFDRecordIsland_FILES = src/TFDPlayer.m src/TFDConfig.m src/TFDTweak.m
-TFDRecordIsland_CFLAGS = -fobjc-arc -O2 -Isrc \
+TFDRecordIsland_FILES = src/TFDPlayer.m src/TFDConfig.m src/TFDTweak.m src/TFDPrefsEntry.m
+TFD_VERSION_STR := $(shell awk '/^Version:/{print $$2; exit}' control)
+TFDRecordIsland_CFLAGS = -fobjc-arc -O2 -Isrc -DTFD_VERSION=\"$(TFD_VERSION_STR)\" \
 	-Wno-deprecated-declarations -Wno-unused-parameter \
 	-Wno-nullability-completeness
 TFDRecordIsland_FRAMEWORKS = UIKit Foundation QuartzCore ImageIO CoreGraphics
@@ -32,12 +33,14 @@ TFDRecordIslandPrefs_RESOURCE_DIRS = prefs/Resources
 include $(THEOS)/makefiles/bundle.mk
 
 after-stage::
-	@echo "==> 安装 PreferenceLoader 入口"
+	@echo "==> 安装 PreferenceLoader 入口（装了 PreferenceLoader 才生效，仅作备用）"
 	@mkdir -p "$(THEOS_STAGING_DIR)/Library/PreferenceLoader/Preferences"
 	@cp layout/Library/PreferenceLoader/Preferences/TFDRecordIsland.plist "$(THEOS_STAGING_DIR)/Library/PreferenceLoader/Preferences/"
 	@echo "==> 校验 PreferenceBundle 是否真的产出了"
 	@test -d "$(THEOS_STAGING_DIR)/Library/PreferenceBundles/TFDRecordIslandPrefs.bundle" || \
 		{ echo "错误: PreferenceBundle 未生成，设置里不会有入口"; exit 1; }
+	@test -f "$(THEOS_STAGING_DIR)/Library/PreferenceBundles/TFDRecordIslandPrefs.bundle/Root.plist" || \
+		{ echo "错误: Root.plist 没进 bundle，面板会是空白"; exit 1; }
 	@ls "$(THEOS_STAGING_DIR)/Library/PreferenceBundles/TFDRecordIslandPrefs.bundle/"
 
 after-install::
