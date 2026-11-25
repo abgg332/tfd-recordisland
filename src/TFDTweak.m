@@ -1,74 +1,64 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
 #import "TFDPlayer.h"
 #import <substrate.h>
 #import "TFDConfig.h"
 
 /*
  ============================================================================
- 录屏岛帧动画 — hook 层
+ 录屏岛帧动画 — hook 层  v1.0.2
  ============================================================================
 
- ## 这个文件的接口依据
+ ## 接口依据（从参考实现反汇编出 20 处 MSHookMessageEx 的明文 selector）
 
- 参考实现里的 20 处 MSHookMessageEx 反汇编出来，selector 是明文的（类名
- 加密在 __DATA 段里）。真实 selector 全集：
+   setTrailingAnimationView: / leadingView / detachedMinimalView /
+   layoutSubviews / setLayoutMode: / setRenderMode: / setDisableUpdateMask: /
+   setElementIdentifier: / contentProviderWillTransitionToSize:...
 
-   群 A: detachedMinimalView / leadingView / layoutSubviews /
-         initWithWaveformView:
-   群 B: setTrailingAnimationView: /
-         contentProviderWillTransitionToSize:inContainerView:transitionCoordinator: /
-         preferredEdgeOutsetsForLayoutMode:suggestedOutsets:maximumOutsets: /
-         setRenderMode: / setDisableUpdateMask: / layoutSubviews
+ ## 本版修正的真 bug
 
- 群 A 和群 B 各出现两次 —— 对应两套类（灵动岛元素视图 + 它的布局/控制器）。
+ 1. **原始 IMP 不能用一个全局槽**。多个类都被 hook 时，后 hook 的会覆盖前一个
+    的 orig，A 类就会调到 B 类的实现 —— 直接崩。本版按「类+selector」分别存。
 
- ## 显示：用哪个接口
+ 2. **MSHookMessageEx 第 3 参数传 NULL 就拿不到 old IMP**；
+    用 class_getMethodImplementation(父类) 冒充更糟，会把本类实现整个跳过。
 
- 真正的接口不是 addSubview，是 **getter**：
+ 3. **不用 addSubview 塞进元素视图、也不改 getter 返回值**。getter 返回外部
+    视图时系统会按自己的生命周期 retain/release，容易类型错乱。改为在元素
+    视图 layoutSubviews 里维护 overlay 子视图，每次布局同步 frame。
 
-     -[<元素视图> leadingView]        左槽
-     -[<元素视图> detachedMinimalView] 脱离时的极小态
-     -[<元素视图> setTrailingAnimationView:]  右槽动画位
+ 4. **只 hook 类自身方法表里的方法**（class_copyMethodList），不用
+    class_getInstanceMethod —— 后者会把继承来的方法也算命中，
+    导致所有子类都被打桩。
 
- addSubview 加进去的视图不参与系统 layout pass —— 展开/收起不跟手、
- 被圆角裁掉、尺寸永远是加进去那一刻的。所以这里 swizzle getter 直接
- **返回我们自己的视图**，系统会像对待它自己的子视图一样布局它。
-
- ## 层级：怎么找
-
- 不硬编码类名（类名每个系统版本都可能变，参考实现里还是加密的）。
- 改为在运行时枚举已加载的类，找「同时响应这些特征 selector」的那个：
-
-     响应 setTrailingAnimationView: 或 leadingView 或 detachedMinimalView
-
- 命中的就是灵动岛元素视图，不管是哪个私有类、叫什么都不影响。
-
- ## 必须先 hook 这几处，只 hook 一处一定漏状态
-
-      layoutSubviews           bounds 已定
-      setLayoutMode:           展开/收起/极小 切换
-      setRenderMode:           渲染模式变了要重挂
-      setDisableUpdateMask:    遮罩更新开关
-      setTrailingAnimationView: / setElementIdentifier:  身份确立
-
- 展开/收起/极小是三套独立布局，各有独立 layout 时机。这就是「只显示
- 一半 / 某个状态没了」的根因。
-
- ## 隐藏：藏在哪一层
-
- 1) 岛内系统内容：只 hidden，**不 removeFromSuperview**。系统视图会被
-    复用，移除后后续状态还原不回来。范围是元素自身的子视图，但
-    **不藏元素自己**（藏了自己也没了），也不藏它的 superview（那是整个
-    灵动岛容器）。—— 藏在元素层，不藏容器层。
- 2) 状态栏红点：hook applyUpdate:toDisplayItem: 直接 return，不执行原
-    实现就不会挂上去。
+ 5. **隐藏只在 overlay 挂上之后执行**，只作用于元素自身子视图，
+    不碰元素自己、不碰 superview。
  ============================================================================
  */
 
 static const char *const kLogTag = "[TFD]";
 
+// ---------------------------------------------------------------- 原始 IMP
+// 按 "类名|selector" 分别保存，绝不用一个全局槽
+static NSMutableDictionary<NSString *, id> *gOrigIMPs;
+
+static NSString *TFDOrigKey(Class cls, NSString *sel) {
+    return [NSString stringWithFormat:@"%@|%@", NSStringFromClass(cls), sel];
+}
+
+static IMP TFDOrig(Class cls, NSString *sel) {
+    id v = gOrigIMPs[TFDOrigKey(cls, sel)];
+    return v ? (IMP)[v pointerValue] : NULL;
+}
+
+static void TFDStoreOrig(Class cls, NSString *sel, IMP imp) {
+    if (!imp) return;
+    gOrigIMPs[TFDOrigKey(cls, sel)] = [NSValue valueWithPointer:imp];
+}
+
+// ---------------------------------------------------------------- 基础判定
 static BOOL TFDEnabled(void) {
     NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:TFD_PREF_DOMAIN];
     if ([d objectForKey:TFD_KEY_ENABLED] == nil) return YES;   // 默认开
@@ -76,26 +66,18 @@ static BOOL TFDEnabled(void) {
 }
 
 static BOOL TFDIsRecording(void) {
-    if (@available(iOS 11.0, *)) {
-        return [UIScreen mainScreen].isCaptured;
-    }
+    if (@available(iOS 11.0, *)) return [UIScreen mainScreen].isCaptured;
     return NO;
 }
 
-/// 素材名缺省时用 "默认"，避免空字符串导致读不到帧
-static NSString *TFDResolvedAsset(NSString *prefix) {
-    NSDictionary *s = TFDReadSettings(prefix);
-    NSString *a = s[@"asset"];
-    return a.length ? a : @"默认";
-}
-
+// ---------------------------------------------------------------- 宿主管理
 @interface TFDHost : NSObject
-/// 每个被托管的宿主视图 → 我们的播放器
 @property (nonatomic, strong) NSMapTable<UIView *, TFDPlayerView *> *map;
+@property (nonatomic, strong) NSMapTable<UIView *, NSString *> *kinds;
 + (instancetype)shared;
-- (TFDPlayerView *)playerForHost:(UIView *)host kind:(NSString *)kind;
+- (void)attachToHost:(UIView *)host kind:(NSString *)kind;
+- (void)detachFromHost:(UIView *)host;
 - (void)syncAll;
-- (void)applyToHost:(UIView *)host kind:(NSString *)kind;
 @end
 
 @implementation TFDHost
@@ -110,6 +92,7 @@ static NSString *TFDResolvedAsset(NSString *prefix) {
 - (instancetype)init {
     if ((self = [super init])) {
         _map = [NSMapTable weakToStrongObjectsMapTable];
+        _kinds = [NSMapTable weakToStrongObjectsMapTable];
     }
     return self;
 }
@@ -118,272 +101,282 @@ static NSString *TFDResolvedAsset(NSString *prefix) {
     TFDPlayerView *p = [self.map objectForKey:host];
     if (!p) {
         p = [[TFDPlayerView alloc] initWithFrame:host.bounds];
+        p.userInteractionEnabled = NO;      // 不抢触摸
         p.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         [self.map setObject:p forKey:host];
     }
     NSDictionary *s = TFDReadSettings(kind);
-    p.assetName          = TFDResolvedAsset(kind);
-    p.fps                = [s[@"fps"] doubleValue];
-    p.rotationEnabled    = [s[@"rotation"] boolValue];
-    p.rotationReverse    = [s[@"rotationReverse"] boolValue];
-    p.rotationSpeed      = [s[@"rotationSpeed"] doubleValue];
-    p.assetScale         = [s[@"scale"] doubleValue];
-    p.offsetX            = [s[@"offsetX"] doubleValue];
-    p.offsetY            = [s[@"offsetY"] doubleValue];
-    p.hideSiblings       = [s[@"hideSiblings"] boolValue];
+    p.assetName       = s[@"asset"];
+    p.fps             = [s[@"fps"] doubleValue];
+    p.rotationEnabled = [s[@"rotation"] boolValue];
+    p.rotationReverse = [s[@"rotationReverse"] boolValue];
+    p.rotationSpeed   = [s[@"rotationSpeed"] doubleValue];
+    p.assetScale      = [s[@"scale"] doubleValue];
+    p.offsetX         = [s[@"offsetX"] doubleValue];
+    p.offsetY         = [s[@"offsetY"] doubleValue];
+    p.hideSiblings    = [s[@"hideSiblings"] boolValue];
     return p;
 }
 
-/// 把播放器挂到宿主上（或从宿主上摘下），并按录屏状态决定显隐
-- (void)applyToHost:(UIView *)host kind:(NSString *)kind {
+- (void)attachToHost:(UIView *)host kind:(NSString *)kind {
     if (!host) return;
+    if (!kind.length) kind = @"默认";
 
-    BOOL want = TFDEnabled() && TFDIsRecording();
-    TFDPlayerView *p = [self.map objectForKey:host];
-
-    if (!want) {
-        if (p) {
-            [p stopPlayback];
-            if (p.superview == host) [p removeFromSuperview];
-        }
-        // 还原被我们藏起来的内容
-        [self setSystemContentHidden:NO inHost:host excluding:p];
+    if (!TFDEnabled() || !TFDIsRecording()) {
+        [self detachFromHost:host];
         return;
     }
 
-    p = [self playerForHost:host kind:kind];
+    [self.kinds setObject:kind forKey:host];
+    TFDPlayerView *p = [self playerForHost:host kind:kind];
+
+    if (host.bounds.size.width <= 0 || host.bounds.size.height <= 0) return;
+
     if (p.superview != host) {
         p.frame = host.bounds;
         [host addSubview:p];
-        NSLog(@"%s 挂载 %@ -> %@ (%.0fx%.0f)", kLogTag, kind, host.class, host.bounds.size.width, host.bounds.size.height);
+        static NSMutableSet *logged;
+        static dispatch_once_t once;
+        dispatch_once(&once, ^{ logged = [NSMutableSet set]; });
+        NSString *key = NSStringFromClass([host class]);
+        if (![logged containsObject:key]) {
+            [logged addObject:key];
+            NSLog(@"%s 挂载 %@ kind=%@ %.0fx%.0f", kLogTag, key, kind,
+                  host.bounds.size.width, host.bounds.size.height);
+        }
+    } else if (!CGRectEqualToRect(p.frame, host.bounds)) {
+        p.frame = host.bounds;              // 每次布局同步尺寸
     }
-    [p reloadAndPlay];
+
     [p applyTransform];
-    // 注意顺序：先挂自己的视图，再藏兄弟，否则把自己也藏了
-    [self setSystemContentHidden:p.hideSiblings inHost:host excluding:p];
+
+    // 先挂自己的视图，再藏兄弟 —— 顺序反了会把自己也藏掉
+    for (UIView *v in host.subviews) {
+        if (v == p) continue;
+        v.hidden = p.hideSiblings;
+    }
 }
 
-- (void)setSystemContentHidden:(BOOL)hidden inHost:(UIView *)host excluding:(UIView *)keep {
-    for (UIView *v in host.subviews) {
-        if (v == keep) continue;
-        v.hidden = hidden;
-    }
+- (void)detachFromHost:(UIView *)host {
+    TFDPlayerView *p = [self.map objectForKey:host];
+    if (!p) return;
+    [p stopPlayback];
+    if (p.superview == host) [p removeFromSuperview];
+    for (UIView *v in host.subviews) v.hidden = NO;      // 还原系统内容
 }
 
 - (void)syncAll {
-    for (UIView *host in self.map.keyEnumerator) {
-        [self applyToHost:host kind:@"默认"];
+    NSMutableArray *hosts = [NSMutableArray array];
+    for (UIView *h in self.map.keyEnumerator) if (h) [hosts addObject:h];
+    for (UIView *h in hosts) {
+        NSString *k = [self.kinds objectForKey:h] ?: @"默认";
+        [self attachToHost:h kind:k];
     }
 }
 
 @end
 
-#pragma mark - 运行时发现元素视图类
+// ---------------------------------------------------------------- 元素身份
+static NSString *TFDKindForHost(id host) {
+    SEL s = NSSelectorFromString(@"elementIdentifier");
+    if ([host respondsToSelector:s]) {
+        id ident = ((id (*)(id, SEL))objc_msgSend)(host, s);
+        if (ident) return [NSString stringWithFormat:@"%@", ident];
+    }
+    return @"默认";
+}
 
-/// 特征 selector：只要一个类响应其中任意一个，就认为它是灵动岛元素视图
-static NSString *const kMarkerSelectors[] = {
-    @"setTrailingAnimationView:",
-    @"leadingView",
-    @"detachedMinimalView",
-    @"setMiniAnimationView:",
-    nil
-};
+// ---------------------------------------------------------------- hook 实现
+// 每个 trampoline 都用「自己所属的类」去取 orig，避免全局槽串味
 
-typedef void (*TFDVoidIMP)(id, SEL);
-typedef UIView *(*TFDViewIMP)(id, SEL);
-
-static NSMutableSet<NSString *> *gHookedClasses;
-static BOOL gRecordingHandlerInstalled = NO;
-
-/// 被托管视图的 layoutSubviews：系统每次重新布局都要把我们的视图尺寸跟上，
-/// 并且重新按录屏状态决定挂/摘。
 static void TFDLayoutSubviews(id self, SEL _cmd) {
     Class cls = object_getClass(self);
-    // 调原实现（父类链上的第一个实现）
-    IMP orig = class_getMethodImplementation(class_getSuperclass(cls), _cmd);
-    if (orig) ((void (*)(id, SEL))orig)(self, _cmd);
-
-    if (![self isKindOfClass:[UIView class]]) return;
-    NSString *kind = @"默认";
-    SEL identSel = NSSelectorFromString(@"elementIdentifier");
-    if ([self respondsToSelector:identSel]) {
-        id ident = ((id (*)(id, SEL))objc_msgSend)(self, identSel);
-        if (ident) kind = [NSString stringWithFormat:@"%@", ident];
-    }
-    [[TFDHost shared] applyToHost:(UIView *)self kind:kind.length ? kind : @"默认"];
+    IMP o = TFDOrig(cls, @"layoutSubviews");
+    if (o) ((void (*)(id, SEL))o)(self, _cmd);
+    if ([self isKindOfClass:[UIView class]])
+        [[TFDHost shared] attachToHost:(UIView *)self kind:TFDKindForHost(self)];
 }
 
 static void TFDLayoutMode(id self, SEL _cmd, long long mode) {
-    IMP orig = class_getMethodImplementation(class_getSuperclass(object_getClass(self)), _cmd);
-    if (orig) ((void (*)(id, SEL, long long))orig)(self, _cmd, mode);
-    if (![self isKindOfClass:[UIView class]]) return;
-    [[TFDHost shared] applyToHost:(UIView *)self kind:@"默认"];
+    Class cls = object_getClass(self);
+    IMP o = TFDOrig(cls, @"setLayoutMode:");
+    if (o) ((void (*)(id, SEL, long long))o)(self, _cmd, mode);
+    if ([self isKindOfClass:[UIView class]])
+        [[TFDHost shared] attachToHost:(UIView *)self kind:TFDKindForHost(self)];
 }
 
-/// 关键：swizzle getter，直接返回我们的视图（不是 addSubview）
-static UIView *TFDLeadingView(id self, SEL _cmd) {
-    if (TFDEnabled() && TFDIsRecording()) {
-        TFDPlayerView *p = [[TFDHost shared] playerForHost:(UIView *)self kind:@"leading"];
-        [[TFDHost shared] applyToHost:(UIView *)self kind:@"leading"];
-        return p;
+static void TFDRenderMode(id self, SEL _cmd, long long mode) {
+    Class cls = object_getClass(self);
+    IMP o = TFDOrig(cls, @"setRenderMode:");
+    if (o) ((void (*)(id, SEL, long long))o)(self, _cmd, mode);
+    if ([self isKindOfClass:[UIView class]])
+        [[TFDHost shared] attachToHost:(UIView *)self kind:TFDKindForHost(self)];
+}
+
+static void TFDDisableMask(id self, SEL _cmd, BOOL disable) {
+    Class cls = object_getClass(self);
+    IMP o = TFDOrig(cls, @"setDisableUpdateMask:");
+    if (o) ((void (*)(id, SEL, BOOL))o)(self, _cmd, disable);
+    if ([self isKindOfClass:[UIView class]])
+        [[TFDHost shared] attachToHost:(UIView *)self kind:TFDKindForHost(self)];
+}
+
+static void TFDSetTrailingAnim(id self, SEL _cmd, UIView *v) {
+    Class cls = object_getClass(self);
+    IMP o = TFDOrig(cls, @"setTrailingAnimationView:");
+    if (o) ((void (*)(id, SEL, UIView *))o)(self, _cmd, v);
+    if ([self isKindOfClass:[UIView class]])
+        [[TFDHost shared] attachToHost:(UIView *)self kind:TFDKindForHost(self)];
+}
+
+/// 身份确立早于首次布局 —— 很多版本「第一次展开不显示」的根因
+static void TFDSetElementIdent(id self, SEL _cmd, id ident) {
+    Class cls = object_getClass(self);
+    IMP o = TFDOrig(cls, @"setElementIdentifier:");
+    if (o) ((void (*)(id, SEL, id))o)(self, _cmd, ident);
+    if ([self isKindOfClass:[UIView class]]) {
+        NSString *k = ident ? [NSString stringWithFormat:@"%@", ident] : @"默认";
+        [[TFDHost shared] attachToHost:(UIView *)self kind:k];
     }
-    // 不录屏时走原实现
-    Class sup = class_getSuperclass(object_getClass(self));
-    IMP orig = class_getMethodImplementation(sup, _cmd);
-    if (orig) return ((UIView *(*)(id, SEL))orig)(self, _cmd);
-    return nil;
 }
 
-static UIView *TFDDetachedMinimalView(id self, SEL _cmd) {
-    if (TFDEnabled() && TFDIsRecording()) {
-        TFDPlayerView *p = [[TFDHost shared] playerForHost:(UIView *)self kind:@"minimal"];
-        [[TFDHost shared] applyToHost:(UIView *)self kind:@"minimal"];
-        return p;
-    }
-    IMP orig = class_getMethodImplementation(class_getSuperclass(object_getClass(self)), _cmd);
-    if (orig) return ((UIView *(*)(id, SEL))orig)(self, _cmd);
-    return nil;
-}
-
-static void TFDSetTrailingAnimationView(id self, SEL _cmd, UIView *v) {
-    IMP orig = class_getMethodImplementation(class_getSuperclass(object_getClass(self)), _cmd);
-    if (orig) ((void (*)(id, SEL, UIView *))orig)(self, _cmd, v);
-    if (TFDEnabled() && TFDIsRecording()) {
-        [[TFDHost shared] applyToHost:(UIView *)self kind:@"trailing"];
-    }
-}
-
-#pragma mark - 状态栏红点
-
+// ---------------------------------------------------------------- 状态栏红点
 static void TFDApplyUpdate(id self, SEL _cmd, id a, id b) {
     if (TFDEnabled() && TFDIsRecording()) {
-        NSLog(@"%s 拦下状态栏录屏指示", kLogTag);
-        return;   // 不调用原实现 = 不挂
+        static BOOL once; if (!once) { once = YES; NSLog(@"%s 已拦下状态栏录屏指示", kLogTag); }
+        return;                                   // 不调原实现 = 不挂指示器
     }
-    IMP orig = class_getMethodImplementation(class_getSuperclass(object_getClass(self)), _cmd);
-    if (orig) ((void (*)(id, SEL, id, id))orig)(self, _cmd, a, b);
+    Class cls = object_getClass(self);
+    IMP o = TFDOrig(cls, @"applyUpdate:toDisplayItem:");
+    if (o) ((void (*)(id, SEL, id, id))o)(self, _cmd, a, b);
 }
 
-#pragma mark - 遍历 class 表
+// ---------------------------------------------------------------- 安装
+static NSMutableSet<NSString *> *gHooked;
+
+/// 只认类自身方法表里的实现（继承来的不算），避免对所有子类打桩
+static BOOL TFDClassOwnsSelector(Class cls, SEL s) {
+    unsigned int n = 0;
+    Method *ms = class_copyMethodList(cls, &n);
+    BOOL own = NO;
+    for (unsigned int i = 0; i < n; i++) {
+        if (method_getName(ms[i]) == s) { own = YES; break; }
+    }
+    if (ms) free(ms);
+    return own;
+}
+
+static void TFDHookOne(Class cls, NSString *selName, IMP newImp) {
+    if (!cls || !selName) return;
+    SEL s = NSSelectorFromString(selName);
+    if (!TFDClassOwnsSelector(cls, s)) return;      // 不碰继承来的方法
+
+    IMP orig = NULL;
+    MSHookMessageEx(cls, s, newImp, &orig);
+    TFDStoreOrig(cls, selName, orig);               // 按类分别保存
+    NSLog(@"%s   hook %@ -%@", kLogTag, NSStringFromClass(cls), selName);
+}
 
 static void TFDHookClass(Class cls) {
     if (!cls) return;
     NSString *name = NSStringFromClass(cls);
-    if (!name || [gHookedClasses containsObject:name]) return;
-    [gHookedClasses addObject:name];
+    if (!name || [name hasPrefix:@"TFD"] || [gHooked containsObject:name]) return;
+    [gHooked addObject:name];
 
-    int hooked = 0;
-
-    // layoutSubviews：一定在类自身实现上才 hook（父类的不用管）
-    if (class_getInstanceMethod(cls, @selector(layoutSubviews))) {
-        MSHookMessageEx(cls, @selector(layoutSubviews), (IMP)&TFDLayoutSubviews, NULL);
-        hooked++;
-    }
-
-    SEL sels[] = {
-        NSSelectorFromString(@"setLayoutMode:"),
-        NSSelectorFromString(@"setTrailingAnimationView:"),
-        NSSelectorFromString(@"setDisableUpdateMask:"),
-        NSSelectorFromString(@"setRenderMode:"),
-    };
-    IMP imps[] = { (IMP)&TFDLayoutMode, (IMP)&TFDSetTrailingAnimationView,
-                   (IMP)&TFDLayoutMode, (IMP)&TFDLayoutMode };
-    for (size_t i = 0; i < sizeof(sels)/sizeof(sels[0]); i++) {
-        if (class_getInstanceMethod(cls, sels[i])) {
-            MSHookMessageEx(cls, sels[i], imps[i], NULL);
-            hooked++;
-        }
-    }
-
-    // getter 注入（真接口）
-    if (class_getInstanceMethod(cls, NSSelectorFromString(@"leadingView"))) {
-        MSHookMessageEx(cls, NSSelectorFromString(@"leadingView"), (IMP)&TFDLeadingView, NULL);
-        hooked++;
-    }
-    if (class_getInstanceMethod(cls, NSSelectorFromString(@"detachedMinimalView"))) {
-        MSHookMessageEx(cls, NSSelectorFromString(@"detachedMinimalView"), (IMP)&TFDDetachedMinimalView, NULL);
-        hooked++;
-    }
-
-    NSLog(@"%s hooked %@ (%d 个点)", kLogTag, name, hooked);
+    TFDHookOne(cls, @"layoutSubviews",            (IMP)&TFDLayoutSubviews);
+    TFDHookOne(cls, @"setLayoutMode:",            (IMP)&TFDLayoutMode);
+    TFDHookOne(cls, @"setRenderMode:",            (IMP)&TFDRenderMode);
+    TFDHookOne(cls, @"setDisableUpdateMask:",     (IMP)&TFDDisableMask);
+    TFDHookOne(cls, @"setTrailingAnimationView:", (IMP)&TFDSetTrailingAnim);
+    TFDHookOne(cls, @"setElementIdentifier:",     (IMP)&TFDSetElementIdent);
 }
+
+/// 特征 selector：响应任意一个就认为是灵动岛元素视图（不硬编码类名）
+static const char *kMarkers[] = {
+    "setTrailingAnimationView:",
+    "leadingView",
+    "detachedMinimalView",
+    "setElementIdentifier:",
+    "setMiniAnimationView:",
+    NULL
+};
+
+static int gDiscovered = -1;
 
 static void TFDDiscoverAndHook(void) {
     int n = objc_getClassList(NULL, 0);
     if (n <= 0) return;
-    Class *classes = (Class *)malloc(sizeof(Class) * n);
+    Class *classes = (Class *)malloc(sizeof(Class) * (size_t)n);
+    if (!classes) return;
     n = objc_getClassList(classes, n);
 
     int found = 0;
     for (int i = 0; i < n; i++) {
         Class c = classes[i];
+        NSString *cn = NSStringFromClass(c);
+        if (!cn || [cn hasPrefix:@"TFD"]) continue;
         BOOL match = NO;
-        for (int k = 0; kMarkerSelectors[k]; k++) {
-            if (class_getInstanceMethod(c, NSSelectorFromString(kMarkerSelectors[k]))) {
-                match = YES;
-                break;
-            }
+        for (int k = 0; kMarkers[k]; k++) {
+            SEL mk = sel_registerName(kMarkers[k]);
+            if (TFDClassOwnsSelector(c, mk)) { match = YES; break; }
         }
         if (!match) continue;
-        // 跳过我们自己的类
-        NSString *cn = NSStringFromClass(c);
-        if ([cn hasPrefix:@"TFD"]) continue;
         TFDHookClass(c);
         found++;
     }
     free(classes);
-    NSLog(@"%s 发现 %d 个灵动岛元素类", kLogTag, found);
+    if (found != gDiscovered) {
+        gDiscovered = found;
+        NSLog(@"%s 扫到 %d 个候选元素类", kLogTag, found);
+    }
 }
 
 static void TFDHookStatusBar(void) {
-    // STUIStatusBarIndicatorRecordingItem -applyUpdate:toDisplayItem:
     Class c = NSClassFromString(@"STUIStatusBarIndicatorRecordingItem");
     if (!c) {
-        NSLog(@"%s 没有 STUIStatusBarIndicatorRecordingItem（iOS 版本差异，跳过）", kLogTag);
+        NSLog(@"%s 无 STUIStatusBarIndicatorRecordingItem（版本差异，跳过）", kLogTag);
         return;
     }
     SEL s = NSSelectorFromString(@"applyUpdate:toDisplayItem:");
-    if (class_getInstanceMethod(c, s)) {
-        MSHookMessageEx(c, s, (IMP)&TFDApplyUpdate, NULL);
-        NSLog(@"%s 状态栏指示器已接管", kLogTag);
-    }
+    if (!TFDClassOwnsSelector(c, s)) return;
+    IMP orig = NULL;
+    MSHookMessageEx(c, s, (IMP)&TFDApplyUpdate, &orig);
+    TFDStoreOrig(c, @"applyUpdate:toDisplayItem:", orig);
+    NSLog(@"%s 状态栏指示器已接管", kLogTag);
 }
 
 static void TFDRecordingChanged(CFNotificationCenterRef center, void *observer,
                                 CFStringRef name, const void *object,
                                 CFDictionaryRef userInfo) {
     BOOL rec = TFDIsRecording();
-    NSLog(@"%s 录屏状态 -> %@", kLogTag, rec ? @"开始" : @"结束");
+    NSLog(@"%s 录屏 -> %@", kLogTag, rec ? @"开始" : @"结束");
     dispatch_async(dispatch_get_main_queue(), ^{
+        if (rec && gDiscovered <= 0) TFDDiscoverAndHook();   // 首次录屏补扫
         [[TFDHost shared] syncAll];
     });
-
-    if (rec && !gRecordingHandlerInstalled) {
-        gRecordingHandlerInstalled = YES;
-        TFDDiscoverAndHook();
-    }
 }
 
 __attribute__((constructor)) static void TFDInstall(void) {
-    NSLog(@"%s v1.0.1 载入 (pid=%d, bundle=%@)", kLogTag, getpid(),
+    NSLog(@"%s v1.0.2 载入 pid=%d bundle=%@", kLogTag, getpid(),
           [NSBundle mainBundle].bundleIdentifier);
 
-    gHookedClasses = [NSMutableSet set];
+    gHooked = [NSMutableSet set];
+    gOrigIMPs = [NSMutableDictionary dictionary];
 
-    // 素材根目录兜底创建
     [[NSFileManager defaultManager] createDirectoryAtPath:TFDDefaultAssetRoot
                               withIntermediateDirectories:YES attributes:nil error:NULL];
 
-    // 类可能还没加载完，延迟一轮再补扫
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        TFDDiscoverAndHook();
-        TFDHookStatusBar();
-    });
+    // 类加载时机不保证，分多轮补扫（0.3s / 1.2s / 3s / 录屏触发时）
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ TFDDiscoverAndHook(); });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ TFDDiscoverAndHook(); TFDHookStatusBar(); });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ TFDDiscoverAndHook(); });
 
     CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
                                     NULL, TFDRecordingChanged,
                                     CFSTR("UIScreenCapturedDidChangeNotification"),
                                     NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
-    NSLog(@"%s 初始化完成", kLogTag);
+    NSLog(@"%s 初始化完成，素材根=%@", kLogTag, TFDDefaultAssetRoot);
 }
